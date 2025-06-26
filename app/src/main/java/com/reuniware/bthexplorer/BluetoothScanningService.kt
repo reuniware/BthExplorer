@@ -495,6 +495,11 @@ class BluetoothScanningService : Service() {
         super.onDestroy()
         stopBleScan()
         stopForeground(STOP_FOREGROUND_REMOVE)
+
+        serviceJob.cancel() // Annuler les coroutines du service
+        // Optionnel : Vider la liste statique si le service est détruit et ne doit pas persister les données
+        // clearDeviceList()
+
         Log.i("BluetoothScanService", "Service destroyed.")
     }
 
