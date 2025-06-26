@@ -3,6 +3,7 @@ package com.reuniware.bthexplorer
 import kotlinx.coroutines.flow.MutableStateFlow
 
 import android.app.Application // Utilisé seulement pour le Preview ici, attention.
+import android.widget.Toast
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -10,6 +11,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
@@ -39,20 +41,54 @@ data class DeviceInfo(
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun BluetoothUiScreen() {
-    // Collecter la liste directement depuis l'objet compagnon du service
-    // Utiliser collectAsStateWithLifecycle pour une collecte respectueuse du cycle de vie
     val devicesList by BluetoothScanningService.discoveredDevicesList.collectAsStateWithLifecycle()
+    val numberOfDevices = devicesList.size // Obtenir le nombre d'appareils
+
+    // --- AJOUT DU TOAST POUR LE TEST ---
+    val context = LocalContext.current
+    // LaunchedEffect se déclenchera chaque fois que numberOfDevices change.
+    // Vous pouvez ajouter d'autres clés si vous voulez qu'il se redéclenche sur d'autres changements.
+    LaunchedEffect(numberOfDevices) {
+        if (numberOfDevices > 0) { // Optionnel : afficher le Toast seulement si des appareils sont détectés
+            Toast.makeText(
+                context,
+                "Nombre d'appareils : $numberOfDevices",
+                Toast.LENGTH_SHORT // Ou Toast.LENGTH_LONG pour une durée plus longue
+            ).show()
+        }
+        // Vous pouvez aussi afficher un Toast si le nombre est 0 pour confirmer
+        // else {
+        //     Toast.makeText(context, "Aucun appareil détecté (Toast)", Toast.LENGTH_SHORT).show()
+        // }
+    }
+    // --- FIN DE L'AJOUT DU TOAST ---
 
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Appareils Bluetooth Détectés") },
+                title = {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("Appareils Bluetooth Détectés")
+                        if (numberOfDevices > 0) {
+                            Text(
+                                text = " ($numberOfDevices)",
+                                style = MaterialTheme.typography.titleMedium,
+                                // MODIFIEZ LA LIGNE CI-DESSOUS POUR CHANGER LA COULEUR
+                                color = MaterialTheme.colorScheme.onSurface // Exemple : couleur différente
+                                // OU
+                                // color = androidx.compose.ui.graphics.Color.Yellow // Exemple : couleur spécifique
+                                // OU
+                                // color = MaterialTheme.colorScheme.error // Exemple : une autre couleur de votre thème
+                            )
+                        }
+                    }
+                },
                 colors = TopAppBarDefaults.topAppBarColors(
                     containerColor = MaterialTheme.colorScheme.primaryContainer,
                     titleContentColor = MaterialTheme.colorScheme.onPrimaryContainer
                 ),
                 actions = {
-                    Button(onClick = { BluetoothScanningService.clearDeviceList() }) { // Appel statique
+                    Button(onClick = { BluetoothScanningService.clearDeviceList() }) {
                         Text("Vider")
                     }
                 }
@@ -62,13 +98,13 @@ fun BluetoothUiScreen() {
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(innerPadding) // Appliquer le padding ici
+                .padding(innerPadding)
         ) {
             if (devicesList.isEmpty()) {
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
-                        .padding(16.dp), // Padding interne pour le message
+                        .padding(16.dp),
                     contentAlignment = Alignment.Center
                 ) {
                     Text(
@@ -87,7 +123,7 @@ fun BluetoothUiScreen() {
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     TableCell(text = "Nom", weight = 2.5f, title = true)
-                    TableCell(text = "Adresse", weight = 3.5f, title = true) // Un peu plus de place pour l'adresse
+                    TableCell(text = "Adresse", weight = 3.5f, title = true)
                     TableCell(text = "RSSI", weight = 1.2f, title = true)
                     TableCell(text = "Dist.", weight = 1.3f, title = true)
                     TableCell(text = "Vu", weight = 1.5f, title = true)
@@ -95,14 +131,14 @@ fun BluetoothUiScreen() {
                 Divider(color = MaterialTheme.colorScheme.outlineVariant)
 
                 LazyColumn(
-                    modifier = Modifier.fillMaxSize() // Prendra l'espace restant
+                    modifier = Modifier.fillMaxSize()
                 ) {
                     items(
                         items = devicesList,
-                        key = { device -> device.address } // Clé unique pour chaque élément
+                        key = { device -> device.address }
                     ) { device ->
                         DeviceRow(device = device)
-                        Divider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)) // Diviseur plus léger entre les lignes
+                        Divider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
                     }
                 }
             }
