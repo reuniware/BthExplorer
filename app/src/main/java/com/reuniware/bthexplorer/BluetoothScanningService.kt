@@ -26,11 +26,63 @@ import androidx.annotation.RequiresPermission
 import androidx.compose.foundation.layout.size
 import androidx.core.app.ActivityCompat // Pour vérifier les permissions
 import androidx.core.app.NotificationCompat // Ajout pour construire la notification
+import androidx.core.graphics.values
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlin.math.pow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.map // <-- Add this import
+import kotlinx.coroutines.flow.stateIn
 
 //import androidx.wear.compose.foundation.size
+data class DeviceInfo(
+    val address: String,
+    val name: String?,
+    val rssi: Int,
+    val estimatedDistance: Double?,
+    val timestamp: Long = System.currentTimeMillis()
+)
 
 class BluetoothScanningService : Service() {
+    private val serviceJob = SupervisorJob()
+    private val serviceScope = CoroutineScope(Dispatchers.Main + serviceJob) // Utiliser Dispatchers.Main pour les updates de UI Flow
+
+    companion object {
+        private val _discoveredDevicesMap = MutableStateFlow<Map<String, DeviceInfo>>(emptyMap())
+
+        // Corrected usage with stateIn
+        val discoveredDevicesList: StateFlow<List<DeviceInfo>> =
+            _discoveredDevicesMap.map { map ->
+                map.values.sortedByDescending { it.rssi } // Or other sorting logic
+            }.stateIn(
+                scope = CoroutineScope(Dispatchers.Main + SupervisorJob()), // Or use the serviceScope if appropriate and accessible
+                started = SharingStarted.WhileSubscribed(2000),
+                initialValue = emptyList<DeviceInfo>()
+            )
+
+        fun clearDeviceList() {
+            _discoveredDevicesMap.update { emptyMap() }
+        }
+    }
+
+    private fun addOrUpdateDeviceToStaticList(deviceInfo: DeviceInfo) {
+        // Mettre à jour le StateFlow statique.
+        // update est thread-safe, mais si vous faites des opérations complexes avant, utilisez le scope du service.
+        serviceScope.launch { // Assurer que la mise à jour se fait sur un thread approprié si nécessaire
+            _discoveredDevicesMap.update { currentDevices ->
+                currentDevices.toMutableMap().apply {
+                    this[deviceInfo.address] = deviceInfo
+                }
+            }
+        }
+    }
 
     private lateinit var bluetoothAdapter: BluetoothAdapter
     private var bluetoothLeScanner: BluetoothLeScanner? = null
@@ -120,6 +172,16 @@ class BluetoothScanningService : Service() {
                     val estimatedDistance = calculateDistance(rssi, TX_POWER_AT_1_METER)
                     val distanceString = if (estimatedDistance > 0) String.format("%.2f m", estimatedDistance) else "N/A"
                     // --- FIN AJOUT/MODIFICATION ---
+
+                    val validDistance = if (estimatedDistance > 0) estimatedDistance else null
+
+                    val deviceInfo = DeviceInfo(
+                        address = deviceAddress,
+                        name = deviceName,
+                        rssi = rssi,
+                        estimatedDistance = validDistance
+                    )
+                    addOrUpdateDeviceToStaticList(deviceInfo) // APPELER LA MÉTHODE DE MISE À JOUR
 
 
                     // Modifiez légèrement le log de TxPower pour être plus informatif
@@ -223,17 +285,23 @@ class BluetoothScanningService : Service() {
                 Log.d("BluetoothScanService", batchLogMessage)
                 FileLogger.log(applicationContext, "BluetoothScanService", batchLogMessage)
 
-                results?.forEach { result ->
-                    result.device?.let { device ->
-                        if (loggedDevicesInThisScanSession.add(device.address)) { // Appliquer la même logique ici
-                            // ... (logique pour obtenir deviceName, etc. pour les résultats de batch) ...
-                            var deviceNameForBatch = "N/A" // Adaptez votre logique
-                            // ...
-                            val batchDeviceDetails = "Batch New Device: Name: $deviceNameForBatch, Address: ${device.address}, RSSI: ${result.rssi}"
-                            Log.i("BluetoothScanService", batchDeviceDetails)
-                            FileLogger.log(applicationContext, "BluetoothScanService", batchDeviceDetails)
-                        }
+                results?.forEach { scanResult ->
+                    // Logique similaire à onScanResult pour extraire et appeler addOrUpdateDeviceToStaticList
+                    val device = scanResult.device
+                    val deviceAddress = device.address
+                    val rssi = scanResult.rssi
+                    var deviceName: String? = "N/A"
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                        if (ActivityCompat.checkSelfPermission(this@BluetoothScanningService, Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED) {
+                            try { deviceName = device.name } catch (e: SecurityException) { deviceName = "No Perm" }
+                        } else { deviceName = "No Perm" }
+                    } else {
+                        try { deviceName = device.name } catch (e: SecurityException) { deviceName = "No Perm (Old)" }
                     }
+                    val estimatedDistance = calculateDistance(rssi, TX_POWER_AT_1_METER)
+                    val validDistance = if (estimatedDistance > 0) estimatedDistance else null
+                    val deviceInfo = DeviceInfo(deviceAddress, deviceName, rssi, validDistance)
+                    addOrUpdateDeviceToStaticList(deviceInfo)
                 }
             }
         }

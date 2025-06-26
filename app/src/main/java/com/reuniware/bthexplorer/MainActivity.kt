@@ -47,7 +47,6 @@ class MainActivity : ComponentActivity() {
         checkAndRequestBluetoothPermissions()
         // --- FIN AJOUT ---
 
-
         setContent {
             BthExplorerTheme {
                 Scaffold(modifier = Modifier.fillMaxSize()) { innerPadding ->
