@@ -1,30 +1,37 @@
 package com.reuniware.bthexplorer
 
+import android.util.Log // Ajout pour le débogage dans la Preview
 import kotlinx.coroutines.flow.MutableStateFlow
-
-import android.app.Application // Utilisé seulement pour le Preview ici, attention.
 import android.widget.Toast
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ArrowDownward
+import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color // Pour le test de couleur
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.ui.unit.TextUnit // Pour la signature de TableCell
-import androidx.lifecycle.compose.collectAsStateWithLifecycle // IMPORTANT
+import androidx.compose.ui.unit.TextUnit
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
-// Définition de DeviceInfo - Si elle est dans BluetoothScanningService.kt, vous pouvez l'importer.
-// Si vous la dupliquez, assurez-vous qu'elles sont compatibles.
-// Il est préférable de la définir une seule fois dans un fichier commun ou dans le service et de l'importer.
+// Assurez-vous que DeviceInfo est correctement définie ou importée
+// Ex: import com.reuniware.bthexplorer.BluetoothScanningService.DeviceInfo
+// ou décommentez et définissez-la ici si elle est partagée.
 /*
 data class DeviceInfo(
     val address: String,
@@ -34,51 +41,86 @@ data class DeviceInfo(
     val timestamp: Long = System.currentTimeMillis()
 )
 */
-// Supposons que DeviceInfo soit importé depuis com.reuniware.bthexplorer.BluetoothScanningService
-// ou un autre fichier partagé. Si ce n'est pas le cas, décommentez la définition ci-dessus.
 
+enum class SortCriterion {
+    NAME, ADDRESS, RSSI, DISTANCE, LAST_SEEN
+}
+
+enum class SortOrder {
+    ASCENDING, DESCENDING
+}
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun BluetoothUiScreen() {
-    val devicesList by BluetoothScanningService.discoveredDevicesList.collectAsStateWithLifecycle()
-    val numberOfDevices = devicesList.size // Obtenir le nombre d'appareils
-
-    // --- AJOUT DU TOAST POUR LE TEST ---
-    val context = LocalContext.current
-    // LaunchedEffect se déclenchera chaque fois que numberOfDevices change.
-    // Vous pouvez ajouter d'autres clés si vous voulez qu'il se redéclenche sur d'autres changements.
-    LaunchedEffect(numberOfDevices) {
-        if (numberOfDevices > 0) { // Optionnel : afficher le Toast seulement si des appareils sont détectés
-            Toast.makeText(
-                context,
-                "Nombre d'appareils : $numberOfDevices",
-                Toast.LENGTH_SHORT // Ou Toast.LENGTH_LONG pour une durée plus longue
-            ).show()
-        }
-        // Vous pouvez aussi afficher un Toast si le nombre est 0 pour confirmer
-        // else {
-        //     Toast.makeText(context, "Aucun appareil détecté (Toast)", Toast.LENGTH_SHORT).show()
-        // }
+fun BluetoothUiScreen(
+    // Paramètre optionnel pour injecter des données dans la Preview
+    previewDevices: List<DeviceInfo>? = null
+) {
+    // Collecte l'état du service uniquement si previewDevices n'est pas fourni
+    val devicesFromServiceState by if (previewDevices == null) {
+        BluetoothScanningService.discoveredDevicesList.collectAsStateWithLifecycle()
+    } else {
+        remember { mutableStateOf(previewDevices) } // Utilise les données de la preview directement
     }
-    // --- FIN DE L'AJOUT DU TOAST ---
+
+    // La liste actuelle à utiliser pour l'UI
+    val currentDeviceList = devicesFromServiceState ?: emptyList() // Fallback sur liste vide si null
+    val numberOfDevices = currentDeviceList.size
+
+    var currentSortCriterion by remember { mutableStateOf(SortCriterion.LAST_SEEN) }
+    var currentSortOrder by remember { mutableStateOf(SortOrder.DESCENDING) }
+
+    val context = LocalContext.current
+
+    // Le Toast ne s'exécutera que si nous ne sommes pas en mode Preview avec des données injectées
+    // Le Toast ne s'exécutera que si nous ne  pas en mode Preview avec des données injectées
+    if (previewDevices == null) {
+        LaunchedEffect(numberOfDevices) {
+            // Ce log s'exécutera uniquement dans l'application réelle, pas avec previewDevices
+            Log.d("BluetoothUiScreenReal", "Real app - numberOfDevices: $numberOfDevices")
+            if (numberOfDevices > 0) {
+                Toast.makeText(context, "Nombre d'appareils : $numberOfDevices", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    val sortedDevicesList = remember(currentDeviceList, currentSortCriterion, currentSortOrder) {
+        val comparator = when (currentSortCriterion) {
+            SortCriterion.NAME -> compareBy<DeviceInfo, String?>(nullsLast(), { it.name?.lowercase() })
+            SortCriterion.ADDRESS -> compareBy { it.address }
+            SortCriterion.RSSI -> compareBy { it.rssi }
+            SortCriterion.DISTANCE -> compareBy(nullsLast()) { it.estimatedDistance }
+            SortCriterion.LAST_SEEN -> compareBy { it.timestamp }
+        }
+        if (currentSortOrder == SortOrder.ASCENDING) {
+            currentDeviceList.sortedWith(comparator)
+        } else {
+            currentDeviceList.sortedWith(comparator.reversed())
+        }
+    }
 
     Scaffold(
         topBar = {
             TopAppBar(
                 title = {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text("Appareils Bluetooth Détectés")
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth() // Assurez-vous que la Row peut prendre toute la largeur
+                    ) {
+                        Text(
+                            text = "Appareils Détectés", // Votre titre complet
+                            style = MaterialTheme.typography.titleLarge, // Ou le style que vous utilisiez
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis, // Important
+                            modifier = Modifier.weight(1f, fill = false) // Le titre prend l'espace nécessaire, s'arrête si pas assez de place pour le reste
+                        )
+                        // Espaceur optionnel si vous voulez un peu d'air entre le titre et le nombre
+                        // Spacer(modifier = Modifier.width(4.dp))
                         if (numberOfDevices > 0) {
                             Text(
                                 text = " ($numberOfDevices)",
-                                style = MaterialTheme.typography.titleMedium,
-                                // MODIFIEZ LA LIGNE CI-DESSOUS POUR CHANGER LA COULEUR
-                                color = MaterialTheme.colorScheme.onSurface // Exemple : couleur différente
-                                // OU
-                                // color = androidx.compose.ui.graphics.Color.Yellow // Exemple : couleur spécifique
-                                // OU
-                                // color = MaterialTheme.colorScheme.error // Exemple : une autre couleur de votre thème
+                                style = MaterialTheme.typography.titleMedium, // Peut-être un style un peu plus petit
+                                color = Color.Red // Ou MaterialTheme.colorScheme.onSurface
                             )
                         }
                     }
@@ -88,8 +130,11 @@ fun BluetoothUiScreen() {
                     titleContentColor = MaterialTheme.colorScheme.onPrimaryContainer
                 ),
                 actions = {
-                    Button(onClick = { BluetoothScanningService.clearDeviceList() }) {
-                        Text("Vider")
+                    // Les actions peuvent être conditionnelles si elles dépendent de l'état réel du service
+                    if (previewDevices == null) { // N'afficher le bouton "Vider" que en mode réel
+                        Button(onClick = { BluetoothScanningService.clearDeviceList() }) {
+                            Text("Vider")
+                        }
                     }
                 }
             )
@@ -100,7 +145,7 @@ fun BluetoothUiScreen() {
                 .fillMaxSize()
                 .padding(innerPadding)
         ) {
-            if (devicesList.isEmpty()) {
+            if (sortedDevicesList.isEmpty()) { // Important: utiliser sortedDevicesList ici
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
@@ -108,13 +153,14 @@ fun BluetoothUiScreen() {
                     contentAlignment = Alignment.Center
                 ) {
                     Text(
-                        "Aucun appareil détecté ou scan non démarré.",
+                        if (previewDevices != null && previewDevices.isEmpty()) "Aucun appareil mocké pour la preview."
+                        else "Aucun appareil détecté ou scan non démarré.",
                         style = MaterialTheme.typography.bodyLarge,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
             } else {
-                // En-têtes de colonnes
+                // EN-TÊTES DE COLONNES CLIQUABLES (poids ajustés comme dans votre code)
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -122,22 +168,40 @@ fun BluetoothUiScreen() {
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    TableCell(text = "Nom", weight = 2.5f, title = true)
-                    TableCell(text = "Adresse", weight = 3.5f, title = true)
-                    TableCell(text = "RSSI", weight = 1.2f, title = true)
-                    TableCell(text = "Dist.", weight = 1.3f, title = true)
-                    TableCell(text = "Vu", weight = 1.5f, title = true)
+                    HeaderCell(text = "Nom", weight = 2.5f, criterion = SortCriterion.NAME, currentCriterion = currentSortCriterion, currentOrder = currentSortOrder) {
+                        /* ... logique de tri ... */
+                        if (currentSortCriterion == SortCriterion.NAME) currentSortOrder = if (currentSortOrder == SortOrder.ASCENDING) SortOrder.DESCENDING else SortOrder.ASCENDING
+                        else { currentSortCriterion = SortCriterion.NAME; currentSortOrder = SortOrder.ASCENDING }
+                    }
+                    HeaderCell(text = "Adresse", weight = 2.0f, /* Votre code avait 2.0f ici */ criterion = SortCriterion.ADDRESS, currentCriterion = currentSortCriterion, currentOrder = currentSortOrder) {
+                        /* ... logique de tri ... */
+                        if (currentSortCriterion == SortCriterion.ADDRESS) currentSortOrder = if (currentSortOrder == SortOrder.ASCENDING) SortOrder.DESCENDING else SortOrder.ASCENDING
+                        else { currentSortCriterion = SortCriterion.ADDRESS; currentSortOrder = SortOrder.ASCENDING }
+                    }
+                    HeaderCell(text = "RSSI", weight = 1.2f, alignment = Alignment.CenterHorizontally, criterion = SortCriterion.RSSI, currentCriterion = currentSortCriterion, currentOrder = currentSortOrder) {
+                        /* ... logique de tri ... */
+                        if (currentSortCriterion == SortCriterion.RSSI) currentSortOrder = if (currentSortOrder == SortOrder.ASCENDING) SortOrder.DESCENDING else SortOrder.ASCENDING
+                        else { currentSortCriterion = SortCriterion.RSSI; currentSortOrder = SortOrder.DESCENDING }
+                    }
+                    HeaderCell(text = "Dist.", weight = 1.3f, alignment = Alignment.CenterHorizontally, criterion = SortCriterion.DISTANCE, currentCriterion = currentSortCriterion, currentOrder = currentSortOrder) {
+                        /* ... logique de tri ... */
+                        if (currentSortCriterion == SortCriterion.DISTANCE) currentSortOrder = if (currentSortOrder == SortOrder.ASCENDING) SortOrder.DESCENDING else SortOrder.ASCENDING
+                        else { currentSortCriterion = SortCriterion.DISTANCE; currentSortOrder = SortOrder.ASCENDING }
+                    }
+                    HeaderCell(text = "Vu", weight = 2.2f, /* Votre code avait 2.2f ici */ alignment = Alignment.CenterHorizontally, criterion = SortCriterion.LAST_SEEN, currentCriterion = currentSortCriterion, currentOrder = currentSortOrder) {
+                        /* ... logique de tri ... */
+                        if (currentSortCriterion == SortCriterion.LAST_SEEN) currentSortOrder = if (currentSortOrder == SortOrder.ASCENDING) SortOrder.DESCENDING else SortOrder.ASCENDING
+                        else { currentSortCriterion = SortCriterion.LAST_SEEN; currentSortOrder = SortOrder.DESCENDING }
+                    }
                 }
                 Divider(color = MaterialTheme.colorScheme.outlineVariant)
 
-                LazyColumn(
-                    modifier = Modifier.fillMaxSize()
-                ) {
+                LazyColumn(modifier = Modifier.fillMaxSize()) {
                     items(
-                        items = devicesList,
+                        items = sortedDevicesList,
                         key = { device -> device.address }
                     ) { device ->
-                        DeviceRow(device = device)
+                        DeviceRow(device = device) // Poids dans DeviceRow doivent correspondre aux en-têtes
                         Divider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
                     }
                 }
@@ -147,28 +211,66 @@ fun BluetoothUiScreen() {
 }
 
 @Composable
-fun DeviceRow(device: DeviceInfo) {
+fun RowScope.HeaderCell(
+    text: String,
+    weight: Float,
+    criterion: SortCriterion,
+    currentCriterion: SortCriterion,
+    currentOrder: SortOrder,
+    alignment: Alignment.Horizontal = Alignment.Start,
+    onClick: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .weight(weight)
+            .clickable(onClick = onClick)
+            .padding(vertical = 4.dp, horizontal = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = when (alignment) {
+            Alignment.CenterHorizontally -> Arrangement.Center
+            Alignment.End -> Arrangement.End
+            else -> Arrangement.Start
+        }
+    ) {
+        Text(
+            text = text,
+            fontWeight = FontWeight.Bold,
+            fontSize = 14.sp,
+            color = MaterialTheme.colorScheme.onSurface,
+            textAlign = when(alignment) {
+                Alignment.CenterHorizontally -> androidx.compose.ui.text.style.TextAlign.Center
+                Alignment.End -> androidx.compose.ui.text.style.TextAlign.End
+                else -> androidx.compose.ui.text.style.TextAlign.Start
+            },
+            modifier = if (alignment != Alignment.Start) Modifier.weight(1f, fill = false) else Modifier
+        )
+        if (currentCriterion == criterion) {
+            Icon(
+                imageVector = if (currentOrder == SortOrder.ASCENDING) Icons.Filled.ArrowUpward else Icons.Filled.ArrowDownward,
+                contentDescription = "Sort order",
+                modifier = Modifier
+                    .size(16.dp)
+                    .padding(start = 2.dp),
+                tint = MaterialTheme.colorScheme.primary
+            )
+        }
+    }
+}
+
+@Composable
+fun DeviceRow(device: DeviceInfo) { // Les poids ici doivent correspondre à ceux des HeaderCell
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 10.dp), // Un peu plus de padding vertical pour la lisibilité
+            .padding(horizontal = 16.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.SpaceBetween
     ) {
         TableCell(text = device.name ?: "N/A", weight = 2.5f)
-        TableCell(text = device.address, weight = 3.5f, fontSize = 12.sp)
+        TableCell(text = device.address, weight = 2.0f, fontSize = 12.sp) // Match HeaderCell
         TableCell(text = "${device.rssi}", weight = 1.2f, alignment = Alignment.CenterHorizontally)
-        TableCell(
-            text = device.estimatedDistance?.let { "%.1fm".format(Locale.US, it) } ?: "-",
-            weight = 1.3f,
-            alignment = Alignment.CenterHorizontally
-        )
-        TableCell(
-            text = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date(device.timestamp)),
-            weight = 1.5f,
-            fontSize = 12.sp,
-            alignment = Alignment.CenterHorizontally
-        )
+        TableCell(text = device.estimatedDistance?.let { "%.1fm".format(Locale.US, it) } ?: "-", weight = 1.3f, alignment = Alignment.CenterHorizontally)
+        TableCell(text = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date(device.timestamp)), weight = 2.2f, fontSize = 12.sp, alignment = Alignment.CenterHorizontally) // Match HeaderCell
     }
 }
 
@@ -176,112 +278,57 @@ fun DeviceRow(device: DeviceInfo) {
 fun RowScope.TableCell(
     text: String,
     weight: Float,
-    alignment: Alignment.Horizontal = Alignment.Start, // Maintenant utilisé
-    title: Boolean = false,
-    fontSize: TextUnit = TextUnit.Unspecified // Type correct pour fontSize
+    alignment: Alignment.Horizontal = Alignment.Start,
+    fontSize: TextUnit = TextUnit.Unspecified,
 ) {
     Text(
         text = text,
         modifier = Modifier
             .weight(weight)
-            .padding(end = 4.dp, start = 4.dp), // Padding horizontal pour chaque cellule
-        fontWeight = if (title) FontWeight.Bold else FontWeight.Normal,
-        fontSize = if (title) 14.sp else if (fontSize != TextUnit.Unspecified) fontSize else MaterialTheme.typography.bodyMedium.fontSize,
-        color = if (title) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant,
-        textAlign = when(alignment) { // Pour utiliser l'alignement horizontal
+            .padding(horizontal = 4.dp),
+        fontWeight = FontWeight.Normal,
+        fontSize = if (fontSize != TextUnit.Unspecified) fontSize else MaterialTheme.typography.bodyMedium.fontSize,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        textAlign = when(alignment) {
             Alignment.CenterHorizontally -> androidx.compose.ui.text.style.TextAlign.Center
             Alignment.End -> androidx.compose.ui.text.style.TextAlign.End
             else -> androidx.compose.ui.text.style.TextAlign.Start
         },
-        maxLines = if (title) 1 else 2, // Permettre au nom de l'appareil de passer sur 2 lignes
-        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis // Pour les noms trop longs
+        maxLines = 2,
+        overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis
     )
 }
 
-
-// --- Preview ---
-// Mock DeviceInfo pour la Preview (si défini dans ce fichier)
-/*
-private val previewDevices = listOf(
-    DeviceInfo("00:11:22:33:44:55", "Mon Super Tracker BLE", -55, 2.5, System.currentTimeMillis() - 10000),
-    DeviceInfo("AA:BB:CC:DD:EE:FF", "Balise Inconnue XYZ", -78, 12.1, System.currentTimeMillis() - 5000),
-    DeviceInfo("A1:B2:C3:D4:E5:F6", null, -60, 4.0, System.currentTimeMillis())
-)
-*/
-
-@Preview(showBackground = true, widthDp = 380)
+@Preview(showBackground = true, name = "UI Avec Appareils Mockés", widthDp = 420)
 @Composable
-fun BluetoothUiScreenPreview() {
-    // Pour la preview, vous ne pourrez pas facilement alimenter le StateFlow statique
-    // du service. Vous pouvez soit afficher un état vide, soit, si vous avez
-    // une manière de mocker `BluetoothScanningService.discoveredDevicesList`
-    // (par exemple, en ayant une version de debug du companion object), vous pourriez l'utiliser.
-    // Pour l'instant, cette preview affichera l'état vide ou ce qui est
-    // potentiellement dans le StateFlow si le service a tourné dans une exécution précédente.
-
-    // Alternative pour la preview: Utiliser un StateFlow local avec des données mockées.
-    // Ceci est UNIQUEMENT pour la preview et ne reflète pas le comportement réel
-    // de connexion au service.
-    val mockDevices = remember {
+fun BluetoothUiScreenPreviewWithDevices() {
+    val mockDevicesForPreview = remember {
         listOf(
-            com.reuniware.bthexplorer.DeviceInfo("00:11:22:33:44:55", "Tracker de Test BLE", -55, 2.5, System.currentTimeMillis() - 10000),
-            com.reuniware.bthexplorer.DeviceInfo("AA:BB:CC:DD:EE:FF", "Balise Inconnue Long Nom", -78, 12.1, System.currentTimeMillis() - 5000),
+            com.reuniware.bthexplorer.DeviceInfo("00:11:22:33:44:55", "Preview Alpha", -55, 2.5, System.currentTimeMillis() - 10000),
+            com.reuniware.bthexplorer.DeviceInfo("AA:BB:CC:DD:EE:FF", "Preview Beta Long Name", -78, 12.1, System.currentTimeMillis() - 5000),
             com.reuniware.bthexplorer.DeviceInfo("A1:B2:C3:D4:E5:F6", null, -60, 4.0, System.currentTimeMillis())
         )
     }
-    val mockDiscoveredDevicesList = remember { MutableStateFlow(mockDevices) }
-
-
-    MaterialTheme { // Assurez-vous d'utiliser votre thème d'application
-        // Pour simuler le Composable réel dans la Preview:
-        // BluetoothUiScreen()
-
-        // Pour une Preview avec des données contrôlées (si BluetoothUiScreen était modifiable pour prendre une liste en paramètre)
-        // BluetoothUiScreenWithData(devicesList = mockDiscoveredDevicesList.collectAsStateWithLifecycle().value)
-
-        // Puisque BluetoothUiScreen utilise directement le StateFlow statique, la preview simple
-        // est la plus directe, mais peut ne pas montrer de données à moins que le service
-        // n'ait déjà peuplé le StateFlow.
-        // Si vous avez importé DeviceInfo depuis le service, utilisez son chemin complet:
-        // com.reuniware.bthexplorer.BluetoothScanningService.DeviceInfo(...)
-        // Sinon, si DeviceInfo est défini localement pour la Preview, utilisez juste DeviceInfo(...)
-        BluetoothUiScreen() // Va essayer de lire BluetoothScanningService.discoveredDevicesList
+    MaterialTheme {
+        BluetoothUiScreen(previewDevices = mockDevicesForPreview)
     }
 }
 
-// Si vous voulez une preview avec des données garanties, vous pourriez temporairement
-// modifier BluetoothUiScreen pour accepter une liste en paramètre.
-/*
-@OptIn(ExperimentalMaterial3Api::class)
+@Preview(showBackground = true, name = "UI Sans Appareils Mockés", widthDp = 420)
 @Composable
-fun BluetoothUiScreenWithData(devicesList: List<com.reuniware.bthexplorer.DeviceInfo>) { // Type complet si importé
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text("Appareils Bluetooth (Preview)") },
-                actions = { Button(onClick = { /* No-op pour preview */ }) { Text("Vider") } }
-            )
-        }
-    ) { innerPadding ->
-        Column(modifier = Modifier.padding(innerPadding).fillMaxSize()) {
-            if (devicesList.isEmpty()) {
-                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    Text("Aucun appareil pour la preview.")
-                }
-            } else {
-                Row(modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
-                    TableCell(text = "Nom", weight = 2.5f, title = true)
-                    // ... autres cellules d'en-tête
-                }
-                Divider()
-                LazyColumn(modifier = Modifier.fillMaxSize()) {
-                    items(items = devicesList, key = { it.address }) { device ->
-                        DeviceRow(device = device)
-                        Divider()
-                    }
-                }
-            }
-        }
+fun BluetoothUiScreenPreviewNoDevices() {
+    MaterialTheme {
+        BluetoothUiScreen(previewDevices = emptyList()) // Test avec une liste vide
     }
 }
-*/
+
+@Preview(showBackground = true, name = "UI (Mode Réel - Vide au début)", widthDp = 420)
+@Composable
+fun BluetoothUiScreenPreviewRealEmpty() {
+    // Cette preview simulera le comportement initial de l'app réelle où la liste du service est vide.
+    // Pour que cela fonctionne, BluetoothScanningService.discoveredDevicesList doit avoir une valeur initiale
+    // (par ex. _discoveredDevicesList = MutableStateFlow(emptyList()) dans le service)
+    MaterialTheme {
+        BluetoothUiScreen(previewDevices = null) // Ne passe pas de liste, donc utilise le service.
+    }
+}
