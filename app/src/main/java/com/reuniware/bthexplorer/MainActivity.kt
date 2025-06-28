@@ -28,14 +28,18 @@ import androidx.navigation.NavController
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
-import com.reuniware.bthexplorer.ui.theme.BthExplorerTheme // Assurez-vous que ce chemin est correct
+import com.reuniware.bthexplorer.ui.theme.BthExplorerTheme
 
 class MainActivity : ComponentActivity() {
 
     private lateinit var bluetoothPermissionLauncher: ActivityResultLauncher<Array<String>>
-    private lateinit var notificationPermissionLauncher: ActivityResultLauncher<String> // Si vous l'utilisez toujours
+    private lateinit var notificationPermissionLauncher: ActivityResultLauncher<String>
+    private lateinit var foregroundLocationPermissionLauncher: ActivityResultLauncher<Array<String>>
+    private lateinit var backgroundLocationPermissionLauncher: ActivityResultLauncher<String>
 
-    // Constantes pour les routes de navigation
+    private var allBluetoothPermissionsGranted = false
+    private var allLocationPermissionsGrantedForService = false
+
     object NavRoutes {
         const val HOME_SCREEN = "home"
         const val BLUETOOTH_DEVICES_SCREEN = "bluetooth_devices"
@@ -44,25 +48,15 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-
         initializePermissionLaunchers()
-
-        // Déplacer la demande de permission à une action utilisateur ou à un moment plus opportun
-        // que directement dans onCreate si l'utilisateur n'a pas encore interagi.
-        // Pour cet exemple, nous la laissons, mais considérez l'UX.
-        checkAndRequestBluetoothPermissions()
-
         setContent {
             BthExplorerTheme {
-                // Le Scaffold principal peut être ici ou dans chaque écran
-                // Pour cet exemple, nous le mettons dans chaque écran pour plus de flexibilité
                 AppNavigator()
             }
         }
     }
 
     private fun initializePermissionLaunchers() {
-        // ... (votre code pour notificationPermissionLauncher reste le même si besoin)
         notificationPermissionLauncher =
             registerForActivityResult(ActivityResultContracts.RequestPermission()) { isGranted ->
                 if (isGranted) {
@@ -72,34 +66,143 @@ class MainActivity : ComponentActivity() {
                 }
             }
 
-
         bluetoothPermissionLauncher =
             registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { permissions ->
-                val allGranted = permissions.entries.all { it.value }
-                if (allGranted) {
+                allBluetoothPermissionsGranted = permissions.entries.all { it.value }
+                if (allBluetoothPermissionsGranted) {
                     Toast.makeText(this, "Permissions Bluetooth accordées.", Toast.LENGTH_SHORT).show()
-                    startBluetoothScanningService()
+                    tryToStartServiceIfAllPermissionsGranted()
                 } else {
-                    Toast.makeText(this, "Permissions Bluetooth refusées. Le scan ne peut pas démarrer.", Toast.LENGTH_LONG).show()
+                    Toast.makeText(this, "Permissions Bluetooth refusées.", Toast.LENGTH_LONG).show()
                     permissions.forEach { (perm, granted) ->
                         if (!granted) Log.w("BluetoothPermissions", "Permission refusée: $perm")
                     }
+                    allBluetoothPermissionsGranted = false
                 }
             }
+
+        foregroundLocationPermissionLauncher =
+            registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { permissions ->
+                val fineLocationGranted = permissions[Manifest.permission.ACCESS_FINE_LOCATION] ?: false
+                val coarseLocationGranted = permissions[Manifest.permission.ACCESS_COARSE_LOCATION] ?: false
+
+                if (fineLocationGranted || coarseLocationGranted) {
+                    Toast.makeText(this, "Permission de localisation au premier plan accordée.", Toast.LENGTH_SHORT).show()
+                    // Si les perms au premier plan sont OK, vérifier/demander celle en arrière-plan
+                    checkAndRequestBackgroundLocationPermission()
+                } else {
+                    Toast.makeText(this, "Permission de localisation au premier plan refusée.", Toast.LENGTH_LONG).show()
+                    allLocationPermissionsGrantedForService = false
+                    // Il faut informer l'utilisateur que sans localisation, certaines fonctionnalités ne marcheront pas.
+                }
+            }
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            backgroundLocationPermissionLauncher =
+                registerForActivityResult(ActivityResultContracts.RequestPermission()) { isGranted ->
+                    if (isGranted) {
+                        Toast.makeText(this, "Permission de localisation en arrière-plan accordée.", Toast.LENGTH_SHORT).show()
+                        allLocationPermissionsGrantedForService = true
+                        tryToStartServiceIfAllPermissionsGranted()
+                    } else {
+                        Toast.makeText(this, "Permission de localisation en arrière-plan refusée.", Toast.LENGTH_LONG).show()
+                        allLocationPermissionsGrantedForService = false
+                        // Expliquer pourquoi c'est important ou comment l'activer manuellement
+                    }
+                }
+        } else {
+            // Pour les versions antérieures à Android Q, la permission de localisation au premier plan
+            // est suffisante si le service est un service de premier plan.
+            // On considère donc la permission de localisation en arrière-plan comme "accordée" par défaut
+            // si celle au premier plan l'est. La logique de `checkAndRequestBackgroundLocationPermission`
+            // et `isBackgroundLocationPermissionGranted` gère cela.
+        }
     }
 
-    // --- Fonctions liées au Bluetooth (inchangées) ---
-    // checkAndRequestBluetoothPermissions()
-    // getRequiredBluetoothPermissions()
-    // startBluetoothScanningService()
-    // actuallyStartTheService()
-    // stopBluetoothScanningService()
-    // sont ici et restent telles que vous les avez fournies.
-    // Je les omets pour la concision de cet exemple, mais elles doivent être présentes.
+    // --- Vérification et Demande Groupée des Permissions ---
+    fun requestAllNecessaryPermissions() {
+        // 1. Vérifier les permissions de localisation en premier
+        checkAndRequestLocationPermissions()
+        // 2. Ensuite, vérifier les permissions Bluetooth.
+        // La fonction `checkAndRequestBluetoothPermissions` essaiera de démarrer le service
+        // via `tryToStartServiceIfAllPermissionsGranted` si les perms BT sont accordées.
+        // `tryToStartServiceIfAllPermissionsGranted` vérifiera alors si les perms de localisation sont aussi OK.
+        checkAndRequestBluetoothPermissions()
+    }
 
-    // --- DEBUT : Logique pour les permissions et le service Bluetooth ---
-    // (Copiez vos fonctions existantes ici)
-    fun checkAndRequestBluetoothPermissions() { // Rendre public si appelé depuis un Composable via une instance de MainActivity
+
+    // --- Logique pour les permissions de LOCALISATION ---
+    private fun areForegroundLocationPermissionsGranted(): Boolean {
+        val fineLocationGranted = ContextCompat.checkSelfPermission(
+            this, Manifest.permission.ACCESS_FINE_LOCATION
+        ) == PackageManager.PERMISSION_GRANTED
+        val coarseLocationGranted = ContextCompat.checkSelfPermission(
+            this, Manifest.permission.ACCESS_COARSE_LOCATION
+        ) == PackageManager.PERMISSION_GRANTED
+        return fineLocationGranted || coarseLocationGranted
+    }
+
+    private fun isBackgroundLocationPermissionGranted(): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            ContextCompat.checkSelfPermission(
+                this, Manifest.permission.ACCESS_BACKGROUND_LOCATION
+            ) == PackageManager.PERMISSION_GRANTED
+        } else {
+            // Avant Android Q, si les perms au premier plan sont accordées, c'est suffisant pour le scan BT
+            // si le service est un service de premier plan.
+            areForegroundLocationPermissionsGranted()
+        }
+    }
+
+    private fun checkAndRequestLocationPermissions() {
+        val permissionsToRequest = mutableListOf<String>()
+        if (!areForegroundLocationPermissionsGranted()) {
+            permissionsToRequest.add(Manifest.permission.ACCESS_FINE_LOCATION)
+            permissionsToRequest.add(Manifest.permission.ACCESS_COARSE_LOCATION) // L'utilisateur choisira
+        }
+
+        if (permissionsToRequest.isNotEmpty()) {
+            Log.d("LocationPermissions", "Demande des permissions de localisation au premier plan: ${permissionsToRequest.joinToString()}")
+            foregroundLocationPermissionLauncher.launch(permissionsToRequest.toTypedArray())
+        } else {
+            Log.d("LocationPermissions", "Permissions de localisation au premier plan déjà accordées.")
+            // Directement vérifier/demander la permission en arrière-plan
+            checkAndRequestBackgroundLocationPermission()
+        }
+    }
+
+    private fun checkAndRequestBackgroundLocationPermission() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            if (areForegroundLocationPermissionsGranted()) { // On ne demande BG que si FG est OK
+                if (!isBackgroundLocationPermissionGranted()) {
+                    // TODO: Afficher une explication à l'utilisateur avant de demander la permission en arrière-plan.
+                    // Par exemple, avec un AlertDialog.
+                    Log.d("LocationPermissions", "Demande de la permission de localisation en arrière-plan.")
+                    backgroundLocationPermissionLauncher.launch(Manifest.permission.ACCESS_BACKGROUND_LOCATION)
+                } else {
+                    Log.d("LocationPermissions", "Permission de localisation en arrière-plan déjà accordée.")
+                    allLocationPermissionsGrantedForService = true
+                    tryToStartServiceIfAllPermissionsGranted()
+                }
+            } else {
+                Log.w("LocationPermissions", "Impossible de demander la localisation en arrière-plan sans la permission au premier plan.")
+                allLocationPermissionsGrantedForService = false
+            }
+        } else {
+            // Avant Android Q, si les perms au premier plan sont OK, c'est suffisant.
+            allLocationPermissionsGrantedForService = areForegroundLocationPermissionsGranted()
+            if(allLocationPermissionsGrantedForService) {
+                Log.d("LocationPermissions", "Pas besoin de permission BG spécifique pour cette version d'Android, FG suffit.")
+                tryToStartServiceIfAllPermissionsGranted()
+            } else {
+                Log.w("LocationPermissions", "Permissions de localisation au premier plan manquantes.")
+            }
+        }
+    }
+
+
+    // --- Logique pour les permissions BLUETOOTH (votre code existant légèrement adapté) ---
+    fun checkAndRequestBluetoothPermissions() {
         val requiredPermissions = getRequiredBluetoothPermissions()
         val permissionsToRequest = requiredPermissions.filter {
             ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED
@@ -107,7 +210,8 @@ class MainActivity : ComponentActivity() {
 
         if (permissionsToRequest.isEmpty()) {
             Log.d("BluetoothPermissions", "Toutes les permissions Bluetooth sont déjà accordées.")
-            startBluetoothScanningService()
+            allBluetoothPermissionsGranted = true
+            tryToStartServiceIfAllPermissionsGranted()
         } else {
             Log.d("BluetoothPermissions", "Demande des permissions Bluetooth: ${permissionsToRequest.joinToString()}")
             bluetoothPermissionLauncher.launch(permissionsToRequest.toTypedArray())
@@ -119,19 +223,52 @@ class MainActivity : ComponentActivity() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             permissions.add(Manifest.permission.BLUETOOTH_SCAN)
             permissions.add(Manifest.permission.BLUETOOTH_CONNECT)
-            // Optionnel : ACCESS_FINE_LOCATION si nécessaire
-            if (ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
-                permissions.add(Manifest.permission.ACCESS_FINE_LOCATION)
-            }
+            // Note: ACCESS_FINE_LOCATION est gérée séparément maintenant pour plus de clarté,
+            // mais BLUETOOTH_SCAN peut la nécessiter implicitement pour les résultats.
+            // Si le scan ne fonctionne pas sans, il faudra la remettre ici OU s'assurer que
+            // la logique de `requestAllNecessaryPermissions` a bien fait accorder la localisation.
         } else {
             permissions.add(Manifest.permission.BLUETOOTH)
             permissions.add(Manifest.permission.BLUETOOTH_ADMIN)
-            permissions.add(Manifest.permission.ACCESS_FINE_LOCATION)
+            // Pour les versions antérieures à S, ACCESS_FINE_LOCATION est obligatoire pour le scan.
+            // Assurons-nous qu'elle est demandée.
+            if (!areForegroundLocationPermissionsGranted()) {
+                // Cette condition est un peu délicate ici. La logique principale
+                // de demande de localisation devrait déjà s'en charger.
+                // On peut l'ajouter ici comme filet de sécurité si la logique externe ne l'a pas fait.
+                // permissions.add(Manifest.permission.ACCESS_FINE_LOCATION) // Plutôt gérée par checkAndRequestLocationPermissions
+            }
         }
+        // Ajout de la permission de localisation si nécessaire pour le scan BT, surtout avant Android S.
+        // La logique est complexe car Android S a changé la donne avec BLUETOOTH_SCAN.
+        // Pour simplifier, on s'assure que si on est avant S, FINE_LOCATION est demandée.
+        // Si on est S ou plus, BLUETOOTH_SCAN peut suffire pour les noms/adresses, mais pas pour la localisation dérivée.
+        // Le plus sûr est de s'assurer que les permissions de localisation sont gérées séparément et accordées.
+        // Pour cet exemple, on suppose que `checkAndRequestLocationPermissions` s'en est occupé.
+
         return permissions.toTypedArray()
     }
 
-    fun startBluetoothScanningService() { // Rendre public si appelé depuis un Composable
+    // --- Démarrage du Service ---
+    private fun tryToStartServiceIfAllPermissionsGranted() {
+        // Mettre à jour allLocationPermissionsGrantedForService en fonction de l'état actuel des perms
+        allLocationPermissionsGrantedForService = areForegroundLocationPermissionsGranted() && isBackgroundLocationPermissionGranted()
+
+        if (allBluetoothPermissionsGranted && allLocationPermissionsGrantedForService) {
+            Log.i("MainActivity", "Toutes les permissions nécessaires (BT et Localisation) sont accordées. Démarrage du service.")
+            startBluetoothScanningService()
+        } else {
+            var missingPerms = ""
+            if (!allBluetoothPermissionsGranted) missingPerms += "Bluetooth "
+            if (!allLocationPermissionsGrantedForService) missingPerms += "Localisation "
+            Log.w("MainActivity", "Permissions manquantes pour démarrer le service: $missingPerms")
+            if (missingPerms.isNotEmpty()) {
+                Toast.makeText(this, "Permissions manquantes: $missingPerms", Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
+    fun startBluetoothScanningService() {
         val bluetoothManager = getSystemService(Context.BLUETOOTH_SERVICE) as? android.bluetooth.BluetoothManager
         val bluetoothAdapter = bluetoothManager?.adapter
 
@@ -143,9 +280,9 @@ class MainActivity : ComponentActivity() {
         if (!bluetoothAdapter.isEnabled) {
             Log.w("BluetoothService", "Bluetooth n'est pas activé.")
             Toast.makeText(this, "Veuillez activer Bluetooth.", Toast.LENGTH_LONG).show()
-            // Ici, vous pourriez vouloir lancer un Intent pour demander l'activation de Bluetooth
+            // Intent pour activer BT:
             // val enableBtIntent = Intent(android.bluetooth.BluetoothAdapter.ACTION_REQUEST_ENABLE)
-            // startActivityForResult(enableBtIntent, REQUEST_ENABLE_BT_CODE) // Gérer le résultat dans onActivityResult
+            // startActivityForResult(enableBtIntent, REQUEST_ENABLE_BT_CODE) // Gérer le résultat
             return
         }
         actuallyStartTheService()
@@ -167,7 +304,7 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    fun stopBluetoothScanningService() { // Rendre public
+    fun stopBluetoothScanningService() {
         Log.d("MainActivity", "Arrêt du BluetoothScanningService.")
         val serviceIntent = Intent(this, BluetoothScanningService::class.java)
         try {
@@ -178,7 +315,6 @@ class MainActivity : ComponentActivity() {
             Toast.makeText(this, "Erreur arrêt service.", Toast.LENGTH_LONG).show()
         }
     }
-    // --- FIN : Logique pour les permissions et le service Bluetooth ---
 }
 
 
@@ -190,22 +326,18 @@ fun AppNavigator() {
     val navController = rememberNavController()
     NavHost(navController = navController, startDestination = MainActivity.NavRoutes.HOME_SCREEN) {
         composable(MainActivity.NavRoutes.HOME_SCREEN) {
-            // Passez l'instance de MainActivity si HomeScreen a besoin d'appeler ses méthodes
-            // Pour cela, vous devrez probablement passer `LocalContext.current as MainActivity`
-            // ou une meilleure approche serait d'utiliser un ViewModel partagé.
-            // Pour la simplicité de cet exemple direct :
-            val mainActivity = LocalContext.current as? MainActivity // Attention: couplage fort
+            val mainActivity = LocalContext.current as? MainActivity
             HomeScreen(navController = navController, mainActivity = mainActivity)
         }
         composable(MainActivity.NavRoutes.BLUETOOTH_DEVICES_SCREEN) {
-            BluetoothUiScreen() // Tel que défini dans BluetoothUiScreen.kt
+            BluetoothUiScreen()
         }
     }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun HomeScreen(navController: NavController, mainActivity: MainActivity?) { // mainActivity peut être null si le cast échoue
+fun HomeScreen(navController: NavController, mainActivity: MainActivity?) {
     Scaffold(
         topBar = {
             TopAppBar(
@@ -222,7 +354,7 @@ fun HomeScreen(navController: NavController, mainActivity: MainActivity?) { // m
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding)
-                .padding(16.dp), // Padding supplémentaire pour le contenu
+                .padding(16.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.Center
         ) {
@@ -238,7 +370,8 @@ fun HomeScreen(navController: NavController, mainActivity: MainActivity?) { // m
             }
             Spacer(modifier = Modifier.height(16.dp))
             Button(onClick = {
-                mainActivity?.checkAndRequestBluetoothPermissions() // Demander les perms et démarrer le service
+                // Demander toutes les permissions nécessaires (Localisation puis Bluetooth)
+                mainActivity?.requestAllNecessaryPermissions()
             }) {
                 Text("Démarrer Scan (Vérif Permissions)")
             }
@@ -252,23 +385,10 @@ fun HomeScreen(navController: NavController, mainActivity: MainActivity?) { // m
     }
 }
 
-// L'ancien Greeting n'est plus directement utilisé par setContent, mais peut être gardé pour des previews ou autres.
-@Composable
-fun Greeting(name: String, modifier: Modifier = Modifier) {
-    Text(
-        text = "Hello $name! (Ancien Greeting)",
-        modifier = modifier
-    )
-}
-
 @Preview(showBackground = true)
 @Composable
 fun DefaultPreview() {
     BthExplorerTheme {
-        // Preview de AppNavigator ou HomeScreen pour voir la structure
-        // Pour preview HomeScreen, vous aurez besoin d'un NavController mocké et d'une instance de MainActivity.
-        // val mockNavController = rememberNavController()
-        // AppNavigator() // Pour preview la navigation de base
-        HomeScreen(navController = rememberNavController(), mainActivity = null) // Preview simple de HomeScreen
+        HomeScreen(navController = rememberNavController(), mainActivity = null)
     }
 }

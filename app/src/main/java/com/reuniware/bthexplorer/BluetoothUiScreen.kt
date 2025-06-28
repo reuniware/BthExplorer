@@ -40,8 +40,11 @@ data class DeviceInfo(
     val name: String?,
     val rssi: Int,
     val estimatedDistance: Double?,
-    val timestamp: Long = System.currentTimeMillis()
+    val timestamp: Long = System.currentTimeMillis(),
+    val latitude: Double? = null, // NOUVEAU CHAMP
+    val longitude: Double? = null // NOUVEAU CHAMP
 )
+
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
