@@ -13,7 +13,7 @@ import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
@@ -39,10 +39,12 @@ import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.unit.TextUnit
+import androidx.compose.ui.draw.alpha
 import androidx.core.content.ContextCompat // Ajouté pour la vérification de permission locale
 import java.text.SimpleDateFormat
 import java.util.*
-import java.util.Comparator // For Comparator interface
+import java.util.Comparator 
+import kotlinx.coroutines.delay
 
 // --- Reprise des éléments de MainActivity.kt pour la complétude du fichier autonome ---
 // (Dans un vrai projet, ces classes/enums seraient dans leurs propres fichiers ou partagés)
@@ -99,6 +101,15 @@ fun BluetoothUiScreen(
     var sortOrderState by remember { mutableStateOf(SortOrder.DESCENDING) } // Utilisant votre enum local
 
     val currentConnectionStatus by rememberUpdatedState(connectionViewModel.connectionState)
+
+    // Timer pour rafraîchir l'état "joignable" en temps réel
+    var currentTime by remember { mutableStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(5000) // Rafraîchir toutes les 5 secondes
+            currentTime = System.currentTimeMillis()
+        }
+    }
 
     val sortedDevices = remember(deviceList, sortCriterion, sortOrderState) {
         val comparator: Comparator<ScannedBluetoothDevice> = when (sortCriterion) {
@@ -165,14 +176,13 @@ fun BluetoothUiScreen(
 
                     if (currentTargetDeviceName == clickedDeviceIdentifier && currentConnectionStatus !is ConnectionStatus.Disconnected) {
                         Toast.makeText(context, "Déjà en interaction avec ${deviceToConnect.name ?: deviceToConnect.address}", Toast.LENGTH_SHORT).show()
-                        return@DeviceListContent
-                    }
-
-                    if (hasBluetoothConnectPermission(context)) {
-                        Log.d("BluetoothUiScreen", "Tentative de connexion à ${deviceToConnect.address}")
-                        connectionViewModel.connectToDevice(deviceToConnect.address)
                     } else {
-                        Toast.makeText(context, "Permission BLUETOOTH_CONNECT requise.", Toast.LENGTH_LONG).show()
+                        if (hasBluetoothConnectPermission(context)) {
+                            Log.d("BluetoothUiScreen", "Tentative de connexion à ${deviceToConnect.address}")
+                            connectionViewModel.connectToDevice(deviceToConnect.address)
+                        } else {
+                            Toast.makeText(context, "Permission BLUETOOTH_CONNECT requise.", Toast.LENGTH_LONG).show()
+                        }
                     }
                 },
                 currentConnectionStatus = currentConnectionStatus,
@@ -180,6 +190,10 @@ fun BluetoothUiScreen(
                     devices.find { (it.name ?: it.address) == name }?.address
                 } ?: (currentConnectionStatus as? ConnectionStatus.Connecting)?.deviceName?.let { name ->
                     devices.find { (it.name ?: it.address) == name }?.address
+                },
+                currentTime = currentTime,
+                onPairClick = { device ->
+                    connectionViewModel.pairDevice(device.address)
                 }
             )
         }
@@ -291,7 +305,9 @@ private fun DeviceListContent(
     onSortChange: (SortCriterion, SortOrder) -> Unit,
     onDeviceClick: (ScannedBluetoothDevice) -> Unit,
     currentConnectionStatus: ConnectionStatus,
-    connectedDeviceAddress: String?
+    connectedDeviceAddress: String?,
+    currentTime: Long,
+    onPairClick: (ScannedBluetoothDevice) -> Unit
 ) {
     Column(modifier = modifier) {
         if (devices.isEmpty() && currentConnectionStatus is ConnectionStatus.Disconnected) {
@@ -307,7 +323,9 @@ private fun DeviceListContent(
                 devices = devices,
                 onDeviceClick = onDeviceClick,
                 connectedDeviceAddress = connectedDeviceAddress,
-                currentConnectionStatus = currentConnectionStatus
+                currentConnectionStatus = currentConnectionStatus,
+                currentTime = currentTime,
+                onPairClick = onPairClick
             )
         }
     }
@@ -414,18 +432,23 @@ private fun DeviceItemsList(
     devices: List<ScannedBluetoothDevice>,
     onDeviceClick: (ScannedBluetoothDevice) -> Unit,
     connectedDeviceAddress: String?,
-    currentConnectionStatus: ConnectionStatus
+    currentConnectionStatus: ConnectionStatus,
+    currentTime: Long,
+    onPairClick: (ScannedBluetoothDevice) -> Unit
 ) {
     LazyColumn(modifier = Modifier.fillMaxSize()) {
         items(items = devices, key = { it.address }) { device ->
             val isConnected = device.address == connectedDeviceAddress && currentConnectionStatus is ConnectionStatus.Connected
             val isConnecting = device.address == connectedDeviceAddress && currentConnectionStatus is ConnectionStatus.Connecting
+            val isReachable = currentTime - device.timestamp < 15000L
 
             DeviceRow(
                 device = device,
                 onClick = { onDeviceClick(device) },
                 isConnected = isConnected,
-                isConnecting = isConnecting
+                isConnecting = isConnecting,
+                isReachable = isReachable,
+                onPairClick = { onPairClick(device) }
             )
             Divider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
         }
@@ -437,7 +460,9 @@ private fun DeviceRow(
     device: ScannedBluetoothDevice,
     onClick: () -> Unit,
     isConnected: Boolean,
-    isConnecting: Boolean
+    isConnecting: Boolean,
+    isReachable: Boolean,
+    onPairClick: () -> Unit
 ) {
     val backgroundColor = when {
         isConnected -> MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.3f)
@@ -450,22 +475,50 @@ private fun DeviceRow(
             .fillMaxWidth()
             .clickable(onClick = onClick)
             .background(backgroundColor)
+            .alpha(if (isReachable) 1.0f else 0.5f)
             .padding(horizontal = 16.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        DeviceCell(text = device.name ?: "N/A", weight = 2.5f)
-        DeviceCell(text = device.address, weight = 2.0f, fontSize = 12.sp)
-        DeviceCell(text = "${device.rssi}", weight = 1.2f, alignment = Alignment.CenterHorizontally)
+        // Indicateur de joignabilité (point vert/gris)
+        Box(
+            modifier = Modifier
+                .size(8.dp)
+                .background(if (isReachable) Color.Green else Color.Gray, CircleShape)
+        )
+        Spacer(modifier = Modifier.width(12.dp))
+
+        DeviceCell(text = device.name ?: "N/A", weight = 2.0f)
+        DeviceCell(text = device.address, weight = 1.8f, fontSize = 10.sp)
+        DeviceCell(text = "${device.rssi}", weight = 0.8f, alignment = Alignment.CenterHorizontally)
+        
+        // On affiche le timestamp formaté pour s'aligner sur le header "Vu à"
         DeviceCell(
             text = SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date(device.timestamp)),
-            weight = 2.2f,
-            fontSize = 12.sp,
+            weight = 1.5f,
+            fontSize = 10.sp,
             alignment = Alignment.CenterHorizontally
         )
-        if (isConnected) {
-            Icon(Icons.Filled.BluetoothConnected, "Connecté", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(start = 4.dp).size(18.dp))
-        } else if (isConnecting) {
-            CircularProgressIndicator(modifier = Modifier.padding(start = 4.dp).size(18.dp), strokeWidth = 2.dp)
+        
+        Row(modifier = Modifier.weight(1.5f), horizontalArrangement = Arrangement.End, verticalAlignment = Alignment.CenterVertically) {
+            if (isReachable && !isConnected && !isConnecting) {
+                IconButton(
+                    onClick = { onPairClick() },
+                    modifier = Modifier.size(32.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.BluetoothSearching, // BluetoothSearching as a substitute for "Pair"
+                        contentDescription = "Pair",
+                        tint = MaterialTheme.colorScheme.secondary,
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+            }
+            
+            if (isConnected) {
+                Icon(Icons.Filled.BluetoothConnected, "Connecté", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp))
+            } else if (isConnecting) {
+                CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+            }
         }
     }
 }

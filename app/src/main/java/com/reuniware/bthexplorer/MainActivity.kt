@@ -43,6 +43,7 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import com.reuniware.bthexplorer.ui.theme.BthExplorerTheme
+import com.google.firebase.firestore.FirebaseFirestore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -75,33 +76,38 @@ sealed class ConnectionStatus {
 open class BluetoothConnectionViewModel(private val context: Context) : ViewModel() {
     var connectionState by mutableStateOf<ConnectionStatus>(ConnectionStatus.Disconnected)
     var connectedDeviceName by mutableStateOf<String?>(null)
+    var discoveredServices = mutableStateListOf<BluetoothGattService>()
     private var bluetoothGatt: BluetoothGatt? = null
 
     private val bluetoothManager = context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
     private val bluetoothAdapter: BluetoothAdapter? = bluetoothManager.adapter
 
     @SuppressLint("MissingPermission")
-    open // Assurez-vous que la permission est gérée avant d'appeler
-    fun connectToDevice(deviceAddress: String) {
-        if (!hasBluetoothConnectPermission(context)) {
-            Log.e("BluetoothVM", "BLUETOOTH_CONNECT permission manquante.")
-            connectionState = ConnectionStatus.Error("Permission BLUETOOTH_CONNECT manquante")
-            return
+    open fun connectToDevice(deviceAddress: String) {
+        try {
+            if (!hasBluetoothConnectPermission(context)) {
+                Log.e("BluetoothVM", "BLUETOOTH_CONNECT permission manquante.")
+                connectionState = ConnectionStatus.Error("Permission manquante")
+                return
+            }
+
+            val device = bluetoothAdapter?.getRemoteDevice(deviceAddress)
+            if (device == null) {
+                connectionState = ConnectionStatus.Error("Appareil non trouvé")
+                return
+            }
+
+            connectionState = ConnectionStatus.Connecting(device.name ?: device.address)
+            connectedDeviceName = device.name ?: device.address
+
+            bluetoothGatt?.close()
+            discoveredServices.clear()
+            Log.d("BluetoothVM", "Connexion à ${device.address}")
+            bluetoothGatt = device.connectGatt(context.applicationContext, false, gattCallback)
+        } catch (e: Exception) {
+            Log.e("BluetoothVM", "Erreur lors de la connexion: ${e.message}")
+            connectionState = ConnectionStatus.Error("Erreur: ${e.message}")
         }
-
-        val device = bluetoothAdapter?.getRemoteDevice(deviceAddress)
-        if (device == null) {
-            Log.e("BluetoothVM", "Impossible d'obtenir BluetoothDevice pour $deviceAddress")
-            connectionState = ConnectionStatus.Error("Appareil non trouvé")
-            return
-        }
-
-        connectionState = ConnectionStatus.Connecting(device.name ?: device.address)
-        connectedDeviceName = device.name ?: device.address
-
-        bluetoothGatt?.close() // Fermer toute connexion GATT précédente
-        Log.d("BluetoothVM", "Tentative de connexion à ${device.address}")
-        bluetoothGatt = device.connectGatt(context.applicationContext, false, gattCallback)
     }
 
     @SuppressLint("MissingPermission")
@@ -114,10 +120,27 @@ open class BluetoothConnectionViewModel(private val context: Context) : ViewMode
         // La fermeture se fait dans onConnectionStateChange
     }
 
+    @SuppressLint("MissingPermission")
+    fun pairDevice(deviceAddress: String) {
+        try {
+            if (!hasBluetoothConnectPermission(context)) {
+                Log.e("BluetoothVM", "Permission manquante pour l'appairage.")
+                return
+            }
+            val device = bluetoothAdapter?.getRemoteDevice(deviceAddress)
+            device?.let {
+                Log.d("BluetoothVM", "Appairage avec ${it.address}")
+                it.createBond()
+            }
+        } catch (e: Exception) {
+            Log.e("BluetoothVM", "Erreur appairage: ${e.message}")
+        }
+    }
+
     private val gattCallback = object : BluetoothGattCallback() {
         @SuppressLint("MissingPermission")
         override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
-            val deviceName = gatt.device.name ?: gatt.device.address
+            val deviceName = try { gatt.device.name ?: gatt.device.address } catch (e: SecurityException) { gatt.device.address }
             Log.d("GattCallback", "onConnectionStateChange: device=${gatt.device.address}, status=$status, newState=$newState")
 
             CoroutineScope(Dispatchers.Main).launch {
@@ -131,6 +154,7 @@ open class BluetoothConnectionViewModel(private val context: Context) : ViewMode
                     BluetoothProfile.STATE_DISCONNECTED -> {
                         connectionState = ConnectionStatus.Disconnected
                         connectedDeviceName = null
+                        discoveredServices.clear()
                         gatt.close()
                         bluetoothGatt = null
                         Log.i("BluetoothGattCallback", "Déconnecté de $deviceName.")
@@ -145,7 +169,7 @@ open class BluetoothConnectionViewModel(private val context: Context) : ViewMode
 
         @SuppressLint("MissingPermission")
         override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
-            val deviceName = gatt.device.name ?: gatt.device.address
+            val deviceName = try { gatt.device.name ?: gatt.device.address } catch (e: SecurityException) { gatt.device.address }
             Log.d("GattCallback", "onServicesDiscovered: device=${gatt.device.address}, status=$status")
             CoroutineScope(Dispatchers.Main).launch {
                 if (status == BluetoothGatt.GATT_SUCCESS) {
@@ -153,6 +177,12 @@ open class BluetoothConnectionViewModel(private val context: Context) : ViewMode
                     if (connectionState is ConnectionStatus.Connected) {
                         connectionState = ConnectionStatus.Connected(deviceName, servicesDiscovered = true)
                     }
+                    discoveredServices.clear()
+                    discoveredServices.addAll(gatt.services)
+                    
+                    // Enregistrer les services dans Firebase
+                    updateServicesInFirebase(gatt.device.address, gatt.services)
+
                     // Vous pouvez lister les services ici si nécessaire
                     gatt.services.forEach { service ->
                         Log.d("ServiceUUID", service.uuid.toString())
@@ -164,6 +194,20 @@ open class BluetoothConnectionViewModel(private val context: Context) : ViewMode
             }
         }
         // Implémentez onCharacteristicRead, etc. ici si nécessaire
+    }
+
+    private fun updateServicesInFirebase(deviceAddress: String, services: List<BluetoothGattService>) {
+        val serviceUuids = services.map { it.uuid.toString() }
+        val firestore = FirebaseFirestore.getInstance()
+        firestore.collection("detected_devices")
+            .document(deviceAddress)
+            .update("services", serviceUuids)
+            .addOnSuccessListener {
+                Log.d("BluetoothVM", "Services mis à jour dans Firebase pour $deviceAddress")
+            }
+            .addOnFailureListener { e ->
+                Log.e("BluetoothVM", "Erreur lors de la mise à jour des services dans Firebase", e)
+            }
     }
 }
 
@@ -191,6 +235,7 @@ class MainActivity : ComponentActivity() {
     object NavRoutes {
         const val HOME_SCREEN = "home"
         const val BLUETOOTH_DEVICES_SCREEN = "bluetooth_devices"
+        const val FIREBASE_DEVICES_SCREEN = "firebase_devices"
     }
 
     // Fournir le BluetoothConnectionViewModel à l'AppNavigator
@@ -477,6 +522,9 @@ class MainActivity : ComponentActivity() {
                         this@MainActivity.tryToStartServiceIfPermissionsSufficient() // Assurez-vous que le service est démarré
                         navController.navigate(NavRoutes.BLUETOOTH_DEVICES_SCREEN)
                     },
+                    onNavigateToFirebase = {
+                        navController.navigate(NavRoutes.FIREBASE_DEVICES_SCREEN)
+                    },
                     mainActivity = this@MainActivity
                 )
             }
@@ -514,6 +562,9 @@ class MainActivity : ComponentActivity() {
                     previewDevices = null // Mettre à null pour la version réelle
                 )
             }
+            composable(NavRoutes.FIREBASE_DEVICES_SCREEN) {
+                FirebaseDevicesScreen(onNavigateBack = { navController.popBackStack() })
+            }
         }
     }
 }
@@ -525,6 +576,7 @@ fun HomeScreen(
     areBluetoothPermissionsGranted: Boolean,
     areNotificationsGranted: Boolean,
     onNavigateToScan: () -> Unit,
+    onNavigateToFirebase: () -> Unit,
     mainActivity: MainActivity
 ) {
     LaunchedEffect(Unit) {
@@ -564,6 +616,10 @@ fun HomeScreen(
         Spacer(modifier = Modifier.height(10.dp))
         Button(onClick = { mainActivity.checkAndRequestLocationPermissions() }) {
             Text("Gérer permissions de localisation")
+        }
+        Spacer(modifier = Modifier.height(10.dp))
+        Button(onClick = onNavigateToFirebase) {
+            Text("Voir les appareils sur Firebase")
         }
 
         if (!areBluetoothPermissionsGranted) {

@@ -2,6 +2,7 @@ plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
+    alias(libs.plugins.google.services)
 }
 
 android {
@@ -50,6 +51,9 @@ dependencies {
     implementation(libs.androidx.ui.tooling.preview)
     implementation(libs.androidx.material3)
     implementation(libs.play.services.location)
+    implementation(platform(libs.firebase.bom))
+    implementation(libs.firebase.firestore)
+    implementation(libs.kotlinx.coroutines.play.services)
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
@@ -61,10 +65,4 @@ dependencies {
 
     implementation("androidx.compose.material:material-icons-core:1.6.7") // Or the latest version
     implementation("androidx.compose.material:material-icons-extended:1.6.7") // Or the latest version
-
-    implementation("com.google.android.gms:play-services-location:21.2.0") // Or the latest version
-    //implementation('com.google.android.gms:play-services-location:21.2.0') // Vérifiez la dernière version
-    //implementation('com.google.android.gms:play-services-location:21.2.0')
-    implementation("com.google.android.gms:play-services-maps:18.2.0") // Dépendance de test
-
 }

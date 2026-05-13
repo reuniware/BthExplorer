@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "926130551070",
+    "project_id": "bthexplorer",
+    "storage_bucket": "bthexplorer.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:926130551070:android:d01fda645326bb021b710f",
+        "android_client_info": {
+          "package_name": "com.reuniware.bthexplorer"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyA-wN1RK4PFEtrKUe3zV_Gj_PfzJ3-Ylbo"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

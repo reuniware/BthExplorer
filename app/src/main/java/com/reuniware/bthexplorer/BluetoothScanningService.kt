@@ -8,6 +8,10 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
 import android.bluetooth.BluetoothAdapter
+import android.bluetooth.BluetoothGatt
+import android.bluetooth.BluetoothGattCallback
+import android.bluetooth.BluetoothGattCharacteristic
+import android.bluetooth.BluetoothProfile
 import android.bluetooth.le.BluetoothLeScanner
 import android.bluetooth.le.ScanCallback
 import android.bluetooth.le.ScanFilter
@@ -27,16 +31,19 @@ import android.os.Looper
 import android.util.Log
 import androidx.core.content.ContextCompat // MODIFIÉ: Utiliser ContextCompat.checkSelfPermission
 import androidx.core.app.NotificationCompat // Pas ActivityCompat ici pour les permissions
-//import androidx.privacysandbox.tools.core.generator.build
 import com.google.android.gms.location.FusedLocationProviderClient
 import com.google.android.gms.location.LocationCallback
 import com.google.android.gms.location.LocationRequest
 import com.google.android.gms.location.LocationResult
 import com.google.android.gms.location.LocationServices
 import com.google.android.gms.location.Priority
+import com.google.firebase.firestore.FieldValue
+import com.google.firebase.firestore.FirebaseFirestore
+import com.google.firebase.firestore.SetOptions
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -45,6 +52,7 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
+import java.util.Calendar
 import java.util.Date
 import java.util.Locale
 import java.util.UUID
@@ -67,6 +75,13 @@ class BluetoothScanningService : Service() {
 
         fun clearDeviceList() {
             _discoveredDevicesMap.update { emptyMap() }
+        }
+        
+        fun requestDatabaseClear(context: Context) {
+             val intent = Intent(context, BluetoothScanningService::class.java).apply {
+                 action = "ACTION_CLEAR_DATABASE"
+             }
+             context.startService(intent)
         }
 
         private const val LOCATION_UPDATE_INTERVAL_MS = 10000L
@@ -103,9 +118,32 @@ class BluetoothScanningService : Service() {
     private lateinit var locationCallback: LocationCallback
     private var requestingLocationUpdates = false
 
+    private val firestore = FirebaseFirestore.getInstance()
+    private var firebaseQuotaExceeded = false
+    private var lastQuotaErrorTimestamp = 0L // Moment où le quota a été dépassé
+
+    // Option 3: Identification via DIS (Device Information Service)
+    private val DIS_SERVICE_UUID = UUID.fromString("0000180a-0000-1000-8000-00805f9b34fb")
+    private val SERIAL_NUMBER_UUID = UUID.fromString("00002a25-0000-1000-8000-00805f9b34fb")
+    private val MODEL_NUMBER_UUID = UUID.fromString("00002a24-0000-1000-8000-00805f9b34fb")
+    
+    private val activeGattConnections = mutableMapOf<String, BluetoothGatt>()
+    private val devicesPendingIdentification = mutableSetOf<String>()
+    private val identifiedDevices = mutableSetOf<String>() // Adresses déjà identifiées dans cette session
+
 
     private inner class DeviceDatabaseHelper(context: Context) :
         SQLiteOpenHelper(context, DATABASE_NAME, null, DATABASE_VERSION) {
+            
+        fun clearDatabase() {
+            try {
+                val db = this.writableDatabase
+                db.delete(TABLE_NAME, null, null)
+                Log.i("BluetoothScanService", "Local database table $TABLE_NAME cleared.")
+            } catch (e: Exception) {
+                Log.e("BluetoothScanService", "Error clearing local database: ${e.message}")
+            }
+        }
 
         override fun onCreate(db: SQLiteDatabase) {
             val createTable = """
@@ -188,6 +226,65 @@ class BluetoothScanningService : Service() {
         }
     }
 
+    private fun sendDeviceToFirebase(deviceInfo: DeviceInfo) {
+        // Si quota dépassé, on vérifie si on peut réessayer (toutes les 1h ou si nouveau jour)
+        if (firebaseQuotaExceeded) {
+            val now = System.currentTimeMillis()
+            val oneHourInMillis = 3600000L
+            
+            val lastErrorCalendar = Calendar.getInstance().apply { timeInMillis = lastQuotaErrorTimestamp }
+            val nowCalendar = Calendar.getInstance().apply { timeInMillis = now }
+            
+            val isNewDay = nowCalendar.get(Calendar.DAY_OF_YEAR) != lastErrorCalendar.get(Calendar.DAY_OF_YEAR)
+            val isCooldownOver = (now - lastQuotaErrorTimestamp) > oneHourInMillis
+
+            if (isNewDay || isCooldownOver) {
+                Log.i("BluetoothScanService", "Tentative de reprise des envois Firebase après délai/nouveau jour.")
+                firebaseQuotaExceeded = false 
+            } else {
+                return // On reste en pause
+            }
+        }
+
+        val deviceData = mutableMapOf(
+            "address" to deviceInfo.address,
+            "name" to deviceInfo.name,
+            "rssi" to deviceInfo.rssi,
+            "estimatedDistance" to deviceInfo.estimatedDistance,
+            "timestamp" to deviceInfo.timestamp,
+            "latitude" to deviceInfo.latitude,
+            "longitude" to deviceInfo.longitude,
+            "detectionCount" to FieldValue.increment(1)
+        )
+        
+        // Ajouter les infos d'identification si disponibles
+        deviceInfo.serialNumber?.let { deviceData["serialNumber"] = it }
+        deviceInfo.modelName?.let { deviceData["modelName"] = it }
+        if (deviceInfo.serviceUuids.isNotEmpty()) {
+            deviceData["services"] = deviceInfo.serviceUuids
+        }
+
+        // On utilise l'adresse MAC comme ID de document pour éviter les doublons
+        firestore.collection("detected_devices")
+            .document(deviceInfo.address)
+            .set(deviceData, SetOptions.merge())
+            .addOnSuccessListener {
+                if (firebaseQuotaExceeded) Log.i("BluetoothScanService", "Quota Firebase rétabli !")
+                firebaseQuotaExceeded = false
+                lastQuotaErrorTimestamp = 0L
+                Log.d("BluetoothScanService", "Device ${deviceInfo.address} updated/added in Firebase")
+            }
+            .addOnFailureListener { e ->
+                if (e.message?.contains("QUOTA_EXCEEDED", ignoreCase = true) == true || 
+                    e.message?.contains("RESOURCE_EXHAUSTED", ignoreCase = true) == true) {
+                    firebaseQuotaExceeded = true
+                    lastQuotaErrorTimestamp = System.currentTimeMillis()
+                    Log.e("BluetoothScanService", "Quota Firebase dépassé ! Mise en pause des envois.")
+                }
+                Log.w("BluetoothScanService", "Error updating device in Firebase", e)
+            }
+    }
+
     @SuppressLint("MissingPermission") // Permissions vérifiées avant de démarrer le scan
     private val leScanCallback = object : ScanCallback() {
         private val currentScanSessionId by lazy { // Un ID unique pour cette instance de session de scan
@@ -221,6 +318,9 @@ class BluetoothScanningService : Service() {
                 val lat = currentLocation?.latitude // Peut être null si la permission de localisation est absente ou la localisation désactivée
                 val lon = currentLocation?.longitude
 
+                // Extraire les services du paquet publicitaire (si présents)
+                val advertisementUuids = scanResult.scanRecord?.serviceUuids?.map { it.uuid.toString() } ?: emptyList()
+
                 val deviceInfo = DeviceInfo(
                     address = deviceAddress,
                     name = deviceName,
@@ -228,7 +328,8 @@ class BluetoothScanningService : Service() {
                     estimatedDistance = validDistance,
                     timestamp = System.currentTimeMillis(), // Toujours le timestamp actuel de la découverte
                     latitude = lat,
-                    longitude = lon
+                    longitude = lon,
+                    serviceUuids = advertisementUuids
                 )
 
                 addOrUpdateDeviceToStaticList(deviceInfo) // Mettre à jour la liste pour l'UI
@@ -239,6 +340,12 @@ class BluetoothScanningService : Service() {
                 // tout en évitant les duplications dans la même session.
                 if (loggedDevicesInThisScanSession.add("${deviceAddress}_${currentScanSessionId}")) {
                     logDeviceToDatabase(deviceInfo, currentScanSessionId)
+                    sendDeviceToFirebase(deviceInfo)
+                    
+                    // Option 3: Tenter une identification DIS si l'appareil est "Unknown" ou pas encore identifié
+                    if (!identifiedDevices.contains(deviceAddress)) {
+                        connectToDeviceAndReadInfo(deviceAddress)
+                    }
                 }
             }
         }
@@ -263,6 +370,124 @@ class BluetoothScanningService : Service() {
             scanning = false
             // Envisager d'arrêter le service ou de tenter un redémarrage différé si l'erreur est critique
             // stopSelf()
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun connectToDeviceAndReadInfo(deviceAddress: String) {
+        if (activeGattConnections.containsKey(deviceAddress) || activeGattConnections.size >= 3) {
+            return // Déjà en cours ou trop de connexions simultanées
+        }
+
+        val device = bluetoothAdapter.getRemoteDevice(deviceAddress)
+        
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) {
+            return
+        }
+
+        Log.d("BluetoothScanService", "Tentative de connexion à $deviceAddress pour identification...")
+        
+        val gattCallback = object : BluetoothGattCallback() {
+            override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
+                try {
+                    if (newState == BluetoothProfile.STATE_CONNECTED) {
+                        Log.d("BluetoothScanService", "Connecté à ${gatt.device.address}, découverte des services...")
+                        gatt.discoverServices()
+                    } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
+                        Log.d("BluetoothScanService", "Déconnecté de ${gatt.device.address}")
+                        activeGattConnections.remove(gatt.device.address)
+                        gatt.close()
+                    }
+                } catch (e: SecurityException) {
+                    Log.e("BluetoothScanService", "SecurityException in onConnectionStateChange", e)
+                }
+            }
+
+            override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
+                try {
+                    if (status == BluetoothGatt.GATT_SUCCESS) {
+                        // Capturer TOUS les services découverts
+                        val discoveredUuids = gatt.services.map { it.uuid.toString() }
+                        val address = gatt.device.address
+                        
+                        _discoveredDevicesMap.update { map ->
+                            val currentInfo = map[address]
+                            if (currentInfo != null) {
+                                // Fusionner les services du scan et de la connexion
+                                val allServices = (currentInfo.serviceUuids + discoveredUuids).distinct()
+                                val updated = currentInfo.copy(serviceUuids = allServices)
+                                // Envoyer à Firebase dès qu'on a découvert les services
+                                sendDeviceToFirebase(updated)
+                                map + (address to updated)
+                            } else map
+                        }
+
+                        val disService = gatt.getService(DIS_SERVICE_UUID)
+                        if (disService != null) {
+                            val serialChar = disService.getCharacteristic(SERIAL_NUMBER_UUID)
+                            if (serialChar != null) {
+                                gatt.readCharacteristic(serialChar)
+                            } else {
+                                val modelChar = disService.getCharacteristic(MODEL_NUMBER_UUID)
+                                if (modelChar != null) {
+                                    gatt.readCharacteristic(modelChar)
+                                } else {
+                                    gatt.disconnect()
+                                }
+                            }
+                        } else {
+                            gatt.disconnect()
+                        }
+                    } else {
+                        gatt.disconnect()
+                    }
+                } catch (e: SecurityException) {
+                    Log.e("BluetoothScanService", "SecurityException in onServicesDiscovered", e)
+                }
+            }
+
+            override fun onCharacteristicRead(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, status: Int) {
+                try {
+                    if (status == BluetoothGatt.GATT_SUCCESS) {
+                        val value = characteristic.getStringValue(0) ?: ""
+                        val address = gatt.device.address
+                        
+                        Log.d("BluetoothScanService", "Donnée DIS lue pour $address: $value")
+                        
+                        val currentInfo = _discoveredDevicesMap.value[address]
+                        if (currentInfo != null) {
+                            val updatedInfo = if (characteristic.uuid == SERIAL_NUMBER_UUID) {
+                                currentInfo.copy(serialNumber = value)
+                            } else {
+                                currentInfo.copy(modelName = value)
+                            }
+                            
+                            if (characteristic.uuid == SERIAL_NUMBER_UUID) {
+                                val modelChar = gatt.getService(DIS_SERVICE_UUID)?.getCharacteristic(MODEL_NUMBER_UUID)
+                                if (modelChar != null) {
+                                    _discoveredDevicesMap.update { it + (address to updatedInfo) }
+                                    gatt.readCharacteristic(modelChar)
+                                    return
+                                }
+                            }
+                            
+                            identifiedDevices.add(address)
+                            _discoveredDevicesMap.update { it + (address to updatedInfo) }
+                            sendDeviceToFirebase(updatedInfo)
+                        }
+                    }
+                    gatt.disconnect()
+                } catch (e: SecurityException) {
+                    Log.e("BluetoothScanService", "SecurityException in onCharacteristicRead", e)
+                }
+            }
+        }
+
+        try {
+            val gatt = device.connectGatt(this, false, gattCallback)
+            activeGattConnections[deviceAddress] = gatt
+        } catch (e: SecurityException) {
+            Log.e("BluetoothScanService", "SecurityException starting connectGatt", e)
         }
     }
 
@@ -386,6 +611,13 @@ class BluetoothScanningService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         Log.i("BluetoothScanService", "Service onStartCommand, Action: ${intent?.action}")
+
+        if (intent?.action == "ACTION_CLEAR_DATABASE") {
+            if (::dbHelper.isInitialized) {
+                dbHelper.clearDatabase()
+            }
+            return START_NOT_STICKY
+        }
 
         val notificationIntent = Intent(this, MainActivity::class.java)
         val pendingIntentFlags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
