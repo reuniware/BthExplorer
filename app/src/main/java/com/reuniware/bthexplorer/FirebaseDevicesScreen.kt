@@ -1,5 +1,7 @@
 package com.reuniware.bthexplorer
 
+import android.content.Intent
+import android.net.Uri
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -10,6 +12,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -288,7 +291,7 @@ fun DeviceDetailDialog(device: Map<String, Any>, onDismiss: () -> Unit) {
 
 @Composable
 fun DeviceDetailContent(device: Map<String, Any>, onDismiss: () -> Unit) {
-    // ... (garder le début existant pour lat/lon)
+    val context = LocalContext.current
     val lat = when (val l = device["latitude"]) {
         is Double -> l
         is Float -> l.toDouble()
@@ -321,7 +324,19 @@ fun DeviceDetailContent(device: Map<String, Any>, onDismiss: () -> Unit) {
             Text(text = "Adresse: $address", style = MaterialTheme.typography.bodyMedium)
             
             if (lat != null && lon != null) {
-                Text(text = "Position: $lat, $lon", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
+                OutlinedButton(
+                    onClick = {
+                        val uri = Uri.parse("geo:$lat,$lon?q=$lat,$lon($name)")
+                        val mapIntent = Intent(Intent.ACTION_VIEW, uri)
+                        context.startActivity(mapIntent)
+                    },
+                    modifier = Modifier.padding(vertical = 8.dp)
+                ) {
+                    Icon(Icons.Default.LocationOn, contentDescription = null)
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(text = "Voir sur la carte", style = MaterialTheme.typography.labelLarge)
+                }
+                Text(text = "Coordonnées: $lat, $lon", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline)
             }
 
             Spacer(modifier = Modifier.height(16.dp))
